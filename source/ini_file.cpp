@@ -64,7 +64,7 @@ void reshade::ini_file::load()
 		return;
 
 	_modified_at = modified_at;
-	file.imbue(std::locale("en-us.UTF-8"));
+	std::locale _locale = file.imbue(std::locale("en-us.UTF-8"));
 
 	// Remove BOM (0xefbbbf means 0xfeff)
 	if (file.get() != 0xef || file.get() != 0xbb || file.get() != 0xbf)
@@ -112,6 +112,7 @@ void reshade::ini_file::load()
 		}
 	}
 }
+
 bool reshade::ini_file::save()
 {
 	if (!_modified)
@@ -148,7 +149,7 @@ bool reshade::ini_file::save()
 	file.imbue(std::locale("en-us.UTF-8"));
 	std::vector<std::string> section_names, key_names;
 
-	for (const auto &section : _sections)
+	for (const auto& section : _sections)
 		section_names.push_back(section.first);
 
 	std::sort(section_names.begin(), section_names.end(), [](std::string a, std::string b) {
@@ -157,11 +158,11 @@ bool reshade::ini_file::save()
 		return a < b;
 		});
 
-	for (const auto &section_name : section_names)
+	for (const auto& section_name : section_names)
 	{
-		const auto &keys = _sections.at(section_name);
+		const auto& keys = _sections.at(section_name);
 
-		for (const auto &key : keys)
+		for (const auto& key : keys)
 			key_names.push_back(key.first);
 
 		std::sort(key_names.begin(), key_names.end(), [](std::string a, std::string b) {
@@ -173,13 +174,13 @@ bool reshade::ini_file::save()
 		if (!section_name.empty())
 			file << '[' << section_name << ']' << '\n';
 
-		for (const auto &key_name : key_names)
+		for (const auto& key_name : key_names)
 		{
 			file << key_name << '=';
 
 			size_t i = 0;
 
-			for (const auto &item : keys.at(key_name))
+			for (const auto& item : keys.at(key_name))
 			{
 				if (i++ != 0)
 					file << ',';
@@ -205,7 +206,7 @@ bool reshade::ini_file::save()
 	return true;
 }
 
-reshade::ini_file &reshade::ini_file::load_cache(const std::filesystem::path &path)
+reshade::ini_file& reshade::ini_file::load_cache(const std::filesystem::path& path)
 {
 	const auto it = g_ini_cache.try_emplace(path, path);
 	if (it.second || std::chrono::seconds(1) > std::filesystem::file_time_type::clock::now() - it.first->second._modified_at)

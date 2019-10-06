@@ -79,8 +79,15 @@ namespace ReShade.Setup
 					}
 				}
 			}
-
-			return new ZipArchive(output, ZipArchiveMode.Read, false);
+			try {
+				return new ZipArchive(output, ZipArchiveMode.Read, false);
+			}
+			catch (Exception e)
+			{
+				Console.WriteLine(e.Message);
+				throw e;
+			}
+			
 		}
 
 		void ShowMessage(string title, string message, string description = null, bool done = false, int exitCode = -1)
@@ -162,9 +169,6 @@ namespace ReShade.Setup
 			ShowMessage("Working on " + name + " ...", "Analyzing " + name + " ...");
 
 			string nameModule = _targetPEInfo.Modules.FirstOrDefault(s =>
-				s.StartsWith("d3d8", StringComparison.OrdinalIgnoreCase) ||
-				s.StartsWith("d3d9", StringComparison.OrdinalIgnoreCase) ||
-				s.StartsWith("dxgi", StringComparison.OrdinalIgnoreCase) ||
 				s.StartsWith("opengl32", StringComparison.OrdinalIgnoreCase) ||
 				s.StartsWith("vulkan-1", StringComparison.OrdinalIgnoreCase));
 
@@ -173,21 +177,13 @@ namespace ReShade.Setup
 				nameModule = string.Empty;
 			}
 
-			bool isApiD3D8 = nameModule.StartsWith("d3d8", StringComparison.OrdinalIgnoreCase);
-			bool isApiD3D9 = isApiD3D8 || nameModule.StartsWith("d3d9", StringComparison.OrdinalIgnoreCase);
-			bool isApiDXGI = nameModule.StartsWith("dxgi", StringComparison.OrdinalIgnoreCase);
+
 			bool isApiOpenGL = nameModule.StartsWith("opengl32", StringComparison.OrdinalIgnoreCase);
 			bool isApiVulkan = nameModule.StartsWith("vulkan-1", StringComparison.OrdinalIgnoreCase);
 
-			if (isApiD3D8 && !_isHeadless)
-			{
-				MessageBox.Show(this, "It looks like the target application uses Direct3D 8. You'll have to download an additional wrapper from 'http://reshade.me/d3d8to9' which converts all API calls to Direct3D 9 in order to use ReShade.", "Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
-			}
-
 			Message.Text = "Select the rendering API the game uses:";
 			ApiGroup.IsEnabled = true;
-			ApiDirect3D9.IsChecked = isApiD3D9;
-			ApiDirectXGI.IsChecked = isApiDXGI;
+
 			ApiOpenGL.IsChecked = isApiOpenGL;
 			ApiVulkan.IsChecked = isApiVulkan;
 		}
@@ -195,10 +191,6 @@ namespace ReShade.Setup
 		{
 			string nameModule = null;
 			ApiGroup.IsEnabled = false;
-			if (ApiDirect3D9.IsChecked == true)
-				nameModule = "d3d9.dll";
-			if (ApiDirectXGI.IsChecked == true)
-				nameModule = "dxgi.dll";
 			if (ApiOpenGL.IsChecked == true)
 				nameModule = "opengl32.dll";
 			if (ApiVulkan.IsChecked == true)
@@ -437,8 +429,6 @@ namespace ReShade.Setup
 						hasApi = true;
 
 						string api = args[++i];
-						ApiDirect3D9.IsChecked = api == "d3d9";
-						ApiDirectXGI.IsChecked = api == "dxgi" || api == "d3d10" || api == "d3d11";
 						ApiOpenGL.IsChecked = api == "opengl";
 						continue;
 					}
