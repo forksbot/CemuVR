@@ -80,8 +80,15 @@ namespace CemuVR.Setup
 					}
 				}
 			}
-
-			return new ZipArchive(output, ZipArchiveMode.Read, false);
+			try {
+				return new ZipArchive(output, ZipArchiveMode.Read, false);
+			}
+			catch (Exception e)
+			{
+				Console.WriteLine(e.Message);
+				throw e;
+			}
+			
 		}
 
 		void ShowMessage(string title, string message, string description = null, bool done = false, int exitCode = -1)

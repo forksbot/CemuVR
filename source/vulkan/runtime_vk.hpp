@@ -65,12 +65,6 @@ namespace reshade::vulkan
 
 		void render_technique(technique &technique) override;
 
-#if RESHADE_GUI
-		bool init_imgui_resources();
-		void render_imgui_draw_data(ImDrawData *draw_data) override;
-		void draw_debug_menu();
-#endif
-
 #if RESHADE_VULKAN_CAPTURE_DEPTH_BUFFERS
 		void detect_depth_source(draw_call_tracker& tracker);
 		bool create_depthstencil_replacement(VkImageView depthstencil, VkImageView depthstencil_replacement, VkImage  image, VkFormat image_format, VkImageUsageFlags image_usage);
@@ -127,18 +121,5 @@ namespace reshade::vulkan
 		std::unordered_map<size_t, VkSampler> _effect_sampler_states;
 
 		draw_call_tracker *_current_tracker = nullptr;
-
-#if RESHADE_GUI
-		unsigned int _imgui_index_buffer_size = 0;
-		VkBuffer _imgui_index_buffer = VK_NULL_HANDLE;
-		unsigned int _imgui_vertex_buffer_size = 0;
-		VkBuffer _imgui_vertex_buffer = VK_NULL_HANDLE;
-		VkSampler _imgui_font_sampler = VK_NULL_HANDLE;
-		VkPipeline _imgui_pipeline = VK_NULL_HANDLE;
-		VkPipelineLayout _imgui_pipeline_layout = VK_NULL_HANDLE;
-		VkDescriptorSetLayout _imgui_descriptor_set_layout = VK_NULL_HANDLE;
-		VkDeviceSize _imgui_vertex_mem_offset = 0;
-		VkDeviceMemory _imgui_vertex_mem = VK_NULL_HANDLE;
-#endif
 	};
 }

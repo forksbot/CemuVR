@@ -7,9 +7,6 @@
 #include "version.h"
 #include "runtime.hpp"
 #include "runtime_objects.hpp"
-#include "effect_parser.hpp"
-#include "effect_codegen.hpp"
-#include "effect_preprocessor.hpp"
 #include "input.hpp"
 #include "ini_file.hpp"
 #include <assert.h>
@@ -128,9 +125,6 @@ reshade::runtime::runtime() :
 
 	_needs_update = check_for_update(_latest_version);
 
-#if RESHADE_GUI
-	init_ui();
-#endif
 	load_config();
 
 	init_vr_system();
@@ -138,13 +132,8 @@ reshade::runtime::runtime() :
 reshade::runtime::~runtime()
 {
 	shutdown_vr_system();
-
 	assert(_worker_threads.empty());
 	assert(!_is_initialized && _techniques.empty());
-
-#if RESHADE_GUI
-	deinit_ui();
-#endif
 }
 
 bool reshade::runtime::on_init(input::window_handle window)
@@ -159,22 +148,13 @@ bool reshade::runtime::on_init(input::window_handle window)
 	_is_initialized = true;
 	_last_reload_time = std::chrono::high_resolution_clock::now();
 
-#if RESHADE_GUI
-	build_font_atlas();
-#endif
-
 	return true;
 }
 void reshade::runtime::on_reset()
 {
-	unload_effects();
 
 	if (!_is_initialized)
 		return;
-
-#if RESHADE_GUI
-	destroy_font_atlas();
-#endif
 
 	LOG(INFO) << "Destroyed runtime environment on runtime " << this << '.';
 
@@ -215,7 +195,7 @@ void reshade::runtime::on_present()
 			switch (vr::VRSystem()->GetTrackedDeviceClass(i))
 			{
 			case vr::TrackedDeviceClass_HMD:
-				// @TODO: Add implementation for providing headset tracking as motion source data.
+				// @TODO: Add implementation for providing headset tracking as right stick input.
 				break;
 			case vr::TrackedDeviceClass_Controller:
 				break;
@@ -238,9 +218,6 @@ void reshade::runtime::on_present()
 		// Do not allow the next shortcuts while effects are being loaded or compiled (since they affect that state)
 		if (!is_loading() && _reload_compile_queue.empty())
 		{
-			if (_input->is_key_pressed(_reload_key_data))
-				load_effects();
-
 			const bool is_next_preset_key_pressed = _input->is_key_pressed(_next_preset_key_data);
 			const bool is_previous_preset_key_pressed = _input->is_key_pressed(_previous_preset_key_data);
 
@@ -260,11 +237,6 @@ void reshade::runtime::on_present()
 				load_current_preset();
 		}
 	}
-
-#if RESHADE_GUI
-	// Draw overlay
-	draw_ui();
-#endif
 
 	// Reset input status
 	_input->next_frame();
@@ -290,295 +262,6 @@ void reshade::runtime::on_present()
 	_drawcalls = _vertices = 0;
 }
 
-void reshade::runtime::load_effect(const std::filesystem::path &path, size_t &out_id)
-{
-	effect_data effect;
-	effect.source_file = path;
-	effect.compile_sucess = true;
-
-	{ // Load, pre-process and compile the source file
-		reshadefx::preprocessor pp;
-		if (path.is_absolute())
-			pp.add_include_path(path.parent_path());
-
-		for (std::filesystem::path include_path : _effect_search_paths)
-		{
-			include_path = absolute_path(include_path);
-			if (!include_path.empty())
-				pp.add_include_path(include_path);
-		}
-
-		pp.add_macro_definition("__RESHADE__", std::to_string(VERSION_MAJOR * 10000 + VERSION_MINOR * 100 + VERSION_REVISION));
-		pp.add_macro_definition("__RESHADE_PERFORMANCE_MODE__", _performance_mode ? "1" : "0");
-		pp.add_macro_definition("__VENDOR__", std::to_string(_vendor_id));
-		pp.add_macro_definition("__DEVICE__", std::to_string(_device_id));
-		pp.add_macro_definition("__RENDERER__", std::to_string(_renderer_id));
-		// Truncate hash to 32-bit, since lexer currently only supports 32-bit numbers anyway
-		pp.add_macro_definition("__APPLICATION__", std::to_string(std::hash<std::string>()(g_target_executable_path.stem().u8string()) & 0xFFFFFFFF));
-		pp.add_macro_definition("BUFFER_WIDTH", std::to_string(_width));
-		pp.add_macro_definition("BUFFER_HEIGHT", std::to_string(_height));
-		pp.add_macro_definition("BUFFER_RCP_WIDTH", "(1.0 / BUFFER_WIDTH)");
-		pp.add_macro_definition("BUFFER_RCP_HEIGHT", "(1.0 / BUFFER_HEIGHT)");
-		pp.add_macro_definition("BUFFER_COLOR_DEPTH", std::to_string(_backbuffer_color_depth));
-
-		std::vector<std::string> preprocessor_definitions = _global_preprocessor_definitions;
-		preprocessor_definitions.insert(preprocessor_definitions.end(), _preset_preprocessor_definitions.begin(), _preset_preprocessor_definitions.end());
-
-		for (const auto &definition : preprocessor_definitions)
-		{
-			if (definition.empty())
-				continue; // Skip invalid definitions
-
-			const size_t equals_index = definition.find('=');
-			if (equals_index != std::string::npos)
-				pp.add_macro_definition(
-					definition.substr(0, equals_index),
-					definition.substr(equals_index + 1));
-			else
-				pp.add_macro_definition(definition);
-		}
-
-		if (!pp.append_file(path))
-		{
-			LOG(ERROR) << "Failed to load " << path << ":\n" << pp.errors();
-			effect.compile_sucess = false;
-		}
-
-		unsigned shader_model;
-		if (_renderer_id == 0x9000)     // D3D9
-			shader_model = 30;
-		else if (_renderer_id < 0xa100) // D3D10
-			shader_model = 40;
-		else if (_renderer_id < 0xb000) // D3D11
-			shader_model = 41;
-		else if (_renderer_id < 0xc000) // D3D12
-			shader_model = 50;
-		else
-			shader_model = 60;
-
-		std::unique_ptr<reshadefx::codegen> codegen;
-		if ((_renderer_id & 0xF0000) == 0)
-			codegen.reset(reshadefx::create_codegen_hlsl(shader_model, true, _performance_mode));
-		else if (_renderer_id < 0x20000)
-			codegen.reset(reshadefx::create_codegen_glsl(true, _performance_mode));
-		else // Vulkan uses SPIR-V input
-			codegen.reset(reshadefx::create_codegen_spirv(true, true, _performance_mode));
-
-		reshadefx::parser parser;
-
-		// Compile the pre-processed source code (try the compile even if the preprocessor step failed to get additional error information)
-		if (!parser.parse(std::move(pp.output()), codegen.get()))
-		{
-			LOG(ERROR) << "Failed to compile " << path << ":\n" << pp.errors() << parser.errors();
-			effect.compile_sucess = false;
-		}
-
-		// Append preprocessor and parser errors to the error list
-		effect.errors = std::move(pp.errors()) + std::move(parser.errors());
-
-		// Write result to effect module
-		codegen->write_result(effect.module);
-	}
-
-	// Fill all specialization constants with values from the current preset
-	if (_performance_mode && !_current_preset_path.empty() && effect.compile_sucess)
-	{
-		const ini_file preset(_current_preset_path);
-		const std::string section(path.filename().u8string());
-
-		for (reshadefx::uniform_info &constant : effect.module.spec_constants)
-		{
-			effect.preamble += "#define SPEC_CONSTANT_" + constant.name + ' ';
-
-			switch (constant.type.base)
-			{
-			case reshadefx::type::t_int:
-				preset.get(section, constant.name, constant.initializer_value.as_int);
-				break;
-			case reshadefx::type::t_bool:
-			case reshadefx::type::t_uint:
-				preset.get(section, constant.name, constant.initializer_value.as_uint);
-				break;
-			case reshadefx::type::t_float:
-				preset.get(section, constant.name, constant.initializer_value.as_float);
-				break;
-			}
-
-			for (unsigned int i = 0; i < constant.type.components(); ++i)
-			{
-				switch (constant.type.base)
-				{
-				case reshadefx::type::t_bool:
-					effect.preamble += constant.initializer_value.as_uint[i] ? "true" : "false";
-					break;
-				case reshadefx::type::t_int:
-					effect.preamble += std::to_string(constant.initializer_value.as_int[i]);
-					break;
-				case reshadefx::type::t_uint:
-					effect.preamble += std::to_string(constant.initializer_value.as_uint[i]);
-					break;
-				case reshadefx::type::t_float:
-					effect.preamble += std::to_string(constant.initializer_value.as_float[i]);
-					break;
-				}
-
-				if (i + 1 < constant.type.components())
-					effect.preamble += ", ";
-			}
-
-			effect.preamble += '\n';
-		}
-	}
-
-	// Guard access to shared variables
-	const std::lock_guard<std::mutex> lock(_reload_mutex);
-
-	effect.index = out_id = _loaded_effects.size();
-	effect.storage_offset = _uniform_data_storage.size();
-
-	for (const reshadefx::uniform_info &info : effect.module.uniforms)
-	{
-		uniform &variable = _uniforms.emplace_back(info);
-		variable.effect_index = effect.index;
-
-		variable.storage_offset = effect.storage_offset + variable.offset;
-		// Create space for the new variable in the storage area and fill it with the initializer value
-		_uniform_data_storage.resize(variable.storage_offset + variable.size);
-
-		// Copy initial data into uniform storage area
-		reset_uniform_value(variable);
-
-		const std::string_view special = variable.annotation_as_string("source");
-		if (special.empty()) /* Ignore if annotation is missing */;
-		else if (special == "frametime")
-			variable.special = special_uniform::frame_time;
-		else if (special == "framecount")
-			variable.special = special_uniform::frame_count;
-		else if (special == "random")
-			variable.special = special_uniform::random;
-		else if (special == "pingpong")
-			variable.special = special_uniform::ping_pong;
-		else if (special == "date")
-			variable.special = special_uniform::date;
-		else if (special == "timer")
-			variable.special = special_uniform::timer;
-		else if (special == "key")
-			variable.special = special_uniform::key;
-		else if (special == "mousepoint")
-			variable.special = special_uniform::mouse_point;
-		else if (special == "mousedelta")
-			variable.special = special_uniform::mouse_delta;
-		else if (special == "mousebutton")
-			variable.special = special_uniform::mouse_button;
-	}
-
-	effect.storage_size = (_uniform_data_storage.size() - effect.storage_offset + 15) & ~15;
-	_uniform_data_storage.resize(effect.storage_offset + effect.storage_size);
-
-	for (const reshadefx::texture_info &info : effect.module.textures)
-	{
-		// Try to share textures with the same name across effects
-		if (const auto existing_texture = std::find_if(_textures.begin(), _textures.end(),
-			[&info](const auto &item) { return item.unique_name == info.unique_name; });
-			existing_texture != _textures.end())
-		{
-			// Cannot share texture if this is a normal one, but the existing one is a reference and vice versa
-			if (info.semantic.empty() != (existing_texture->impl_reference == texture_reference::none))
-			{
-				effect.errors += "error: " + info.unique_name + ": another effect (";
-				effect.errors += _loaded_effects[existing_texture->effect_index].source_file.filename().u8string();
-				effect.errors += ") already created a texture with the same name but different usage; rename the variable to fix this error\n";
-				effect.compile_sucess = false;
-				break;
-			}
-			else if (info.semantic.empty() && !existing_texture->matches_description(info))
-			{
-				effect.errors += "warning: " + info.unique_name + ": another effect (";
-				effect.errors += _loaded_effects[existing_texture->effect_index].source_file.filename().u8string();
-				effect.errors += ") already created a texture with the same name but different dimensions; textures are shared across all effects, so either rename the variable or adjust the dimensions so they match\n";
-			}
-
-			existing_texture->shared = true;
-			continue;
-		}
-
-		texture &texture = _textures.emplace_back(info);
-		texture.effect_index = effect.index;
-
-		if (info.semantic == "COLOR")
-			texture.impl_reference = texture_reference::back_buffer;
-		else if (info.semantic == "DEPTH")
-			texture.impl_reference = texture_reference::depth_buffer;
-		else if (!info.semantic.empty())
-			effect.errors += "warning: " + info.unique_name + ": unknown semantic '" + info.semantic + "'\n";
-	}
-
-	_loaded_effects.push_back(effect); // The 'enable_technique' call below needs to access this, so append the effect now
-
-	for (const reshadefx::technique_info &info : effect.module.techniques)
-	{
-		technique &technique = _techniques.emplace_back(info);
-		technique.effect_index = effect.index;
-
-		technique.hidden = technique.annotation_as_int("hidden") != 0;
-		technique.timeout = technique.annotation_as_int("timeout");
-		technique.timeleft = technique.timeout;
-		technique.toggle_key_data[0] = technique.annotation_as_int("toggle");
-		technique.toggle_key_data[1] = technique.annotation_as_int("togglectrl");
-		technique.toggle_key_data[2] = technique.annotation_as_int("toggleshift");
-		technique.toggle_key_data[3] = technique.annotation_as_int("togglealt");
-
-		if (technique.annotation_as_int("enabled"))
-			enable_technique(technique);
-	}
-
-	if (effect.compile_sucess)
-		if (effect.errors.empty())
-			LOG(INFO) << "Successfully loaded " << path << '.';
-		else
-			LOG(WARN) << "Successfully loaded " << path << " with warnings:\n" << effect.errors;
-
-	_reload_remaining_effects--;
-	_last_reload_successful &= effect.compile_sucess;
-}
-void reshade::runtime::load_effects()
-{
-	// Clear out any previous effects
-	unload_effects();
-
-	_last_reload_successful = true;
-
-	// Reload preprocessor definitions from current preset before compiling
-	if (!_current_preset_path.empty())
-	{
-		_preset_preprocessor_definitions.clear();
-
-		const ini_file &preset = ini_file::load_cache(_current_preset_path);
-		preset.get("", "PreprocessorDefinitions", _preset_preprocessor_definitions);
-	}
-
-	// Build a list of effect files by walking through the effect search paths
-	const std::vector<std::filesystem::path> effect_files =
-		find_files(_effect_search_paths, { ".fx" });
-
-	_reload_total_effects = effect_files.size();
-	_reload_remaining_effects = _reload_total_effects;
-
-	if (_reload_total_effects == 0)
-		return; // No effect files found, so nothing more to do
-
-	// Now that we have a list of files, load them in parallel
-	// Split workload into batches instead of launching a thread for every file to avoid launch overhead and stutters due to too many threads being in flight
-	const size_t num_splits = std::min<size_t>(effect_files.size(), std::max<size_t>(std::thread::hardware_concurrency(), 2u) - 1);
-
-	// Keep track of the spawned threads, so the runtime cannot be destroyed while they are still running
-	for (size_t n = 0; n < num_splits; ++n)
-		_worker_threads.emplace_back([this, effect_files, num_splits, n]() {
-			for (size_t id, i = 0; i < effect_files.size(); ++i)
-				if (i * num_splits / effect_files.size() == n)
-					load_effect(effect_files[i], id);
-		});
-}
 void reshade::runtime::load_textures()
 {
 	LOG(INFO) << "Loading image files for textures ...";
@@ -639,279 +322,6 @@ void reshade::runtime::load_textures()
 	}
 
 	_textures_loaded = true;
-}
-
-void reshade::runtime::unload_effect(size_t id)
-{
-#if RESHADE_GUI
-	_selected_effect = std::numeric_limits<size_t>::max();
-	_selected_effect_changed = true; // Force editor to clear text after effects where reloaded
-	_preview_texture = nullptr;
-	_effect_filter_buffer[0] = '\0'; // And reset filter too, since the list of techniques might have changed
-#endif
-
-	_uniforms.erase(std::remove_if(_uniforms.begin(), _uniforms.end(),
-		[id](const auto &it) { return it.effect_index == id; }), _uniforms.end());
-	_textures.erase(std::remove_if(_textures.begin(), _textures.end(),
-		[id](const auto &it) { return it.effect_index == id; }), _textures.end());
-	_techniques.erase(std::remove_if(_techniques.begin(), _techniques.end(),
-		[id](const auto &it) { return it.effect_index == id; }), _techniques.end());
-
-	_loaded_effects[id].source_file.clear();
-}
-void reshade::runtime::unload_effects()
-{
-#if RESHADE_GUI
-	_selected_effect = std::numeric_limits<size_t>::max();
-	_selected_effect_changed = true; // Force editor to clear text after effects where reloaded
-	_preview_texture = nullptr;
-	_effect_filter_buffer[0] = '\0'; // And reset filter too, since the list of techniques might have changed
-#endif
-
-	// Make sure no threads are still accessing effect data
-	for (std::thread &thread : _worker_threads)
-		thread.join();
-	_worker_threads.clear();
-
-	_uniforms.clear();
-	_textures.clear();
-	_techniques.clear();
-
-	_loaded_effects.clear();
-	_uniform_data_storage.clear();
-
-	_textures_loaded = false;
-}
-
-void reshade::runtime::update_and_render_effects()
-{
-	// Delay first load to the first render call to avoid loading while the application is still initializing
-	if (_framecount == 0 && !_no_reload_on_init)
-		load_effects();
-
-	if (_reload_remaining_effects == 0)
-	{
-		// Finished loading effects, so apply preset to figure out which ones need compiling
-		load_current_preset();
-
-		_last_reload_time = std::chrono::high_resolution_clock::now();
-		_reload_total_effects = 0;
-		_reload_remaining_effects = std::numeric_limits<size_t>::max();
-	}
-	else if (_reload_remaining_effects != std::numeric_limits<size_t>::max())
-	{
-		return; // Cannot render while effects are still being loaded
-	}
-	else
-	{
-		if (!_reload_compile_queue.empty())
-		{
-			// Pop an effect from the queue
-			size_t effect_index = _reload_compile_queue.back();
-			_reload_compile_queue.pop_back();
-
-			effect_data &effect = _loaded_effects[effect_index];
-
-			// Create textures now, since they are referenced when building samplers in the 'compile_effect' call below
-			bool success = true;
-			for (texture &texture : _textures)
-			{
-				if (texture.impl == nullptr && (texture.effect_index == effect_index || texture.shared))
-				{
-					if (!init_texture(texture))
-					{
-						success = false;
-						effect.errors += "Failed to create texture " + texture.unique_name;
-						break;
-					}
-				}
-			}
-
-			// Compile the effect with the back-end implementation
-			if (success && !compile_effect(effect))
-			{
-				// De-duplicate error lines (D3DCompiler sometimes repeats the same error multiple times)
-				for (size_t cur_line_offset = 0, next_line_offset, end_offset;
-					(next_line_offset = effect.errors.find('\n', cur_line_offset)) != std::string::npos && (end_offset = effect.errors.find('\n', next_line_offset + 1)) != std::string::npos; cur_line_offset = next_line_offset + 1)
-				{
-					const std::string_view cur_line(effect.errors.c_str() + cur_line_offset, next_line_offset - cur_line_offset);
-					const std::string_view next_line(effect.errors.c_str() + next_line_offset + 1, end_offset - next_line_offset - 1);
-
-					if (cur_line == next_line)
-					{
-						effect.errors.erase(next_line_offset, end_offset - next_line_offset);
-						next_line_offset = cur_line_offset - 1;
-					}
-				}
-
-				LOG(ERROR) << "Failed to compile " << effect.source_file << ":\n" << effect.errors;
-
-				success = false;
-			}
-
-			if (!success) // Something went wrong, do clean up
-			{
-				// Destroy all textures belonging to this effect
-				for (texture &texture : _textures)
-					if (texture.effect_index == effect_index && !texture.shared)
-						texture.impl.reset();
-				// Disable all techniques belonging to this effect
-				for (technique &technique : _techniques)
-					if (technique.effect_index == effect_index)
-						disable_technique(technique);
-
-				effect.compile_sucess = false;
-				_last_reload_successful = false;
-			}
-
-			effect.runtime_loaded = success;
-			// An effect has changed, need to reload textures
-			_textures_loaded = false;
-		}
-		else if (!_textures_loaded)
-		{
-			// Now that all effects were compiled, load all textures
-			load_textures();
-		}
-	}
-
-	// Lock input so it cannot be modified by other threads while we are reading it here
-	// TODO: This does not catch input happening between now and 'on_present'
-	const auto input_lock = _input->lock();
-
-	if (_should_save_screenshot && (_screenshot_save_before || !_effects_enabled))
-		save_screenshot(_effects_enabled ? L"-original" : std::wstring(), !_effects_enabled);
-
-	// Nothing to do here if effects are disabled globally
-	if (!_effects_enabled)
-	{
-		_should_save_screenshot = false;
-		return;
-	}
-
-	// Update special uniform variables
-	for (uniform &variable : _uniforms)
-	{
-		switch (variable.special)
-		{
-		case special_uniform::frame_time:
-			set_uniform_value(variable, _last_frame_duration.count() * 1e-6f, 0.0f, 0.0f, 0.0f);
-			break;
-		case special_uniform::frame_count:
-			if (variable.type.is_boolean())
-				set_uniform_value(variable, (_framecount % 2) == 0);
-			else
-				set_uniform_value(variable, static_cast<unsigned int>(_framecount % UINT_MAX));
-			break;
-		case special_uniform::random: {
-			const int min = variable.annotation_as_int("min");
-			const int max = variable.annotation_as_int("max");
-			set_uniform_value(variable, min + (std::rand() % (max - min + 1)));
-			break; }
-		case special_uniform::ping_pong: {
-			const float min = variable.annotation_as_float("min");
-			const float max = variable.annotation_as_float("max");
-			const float step_min = variable.annotation_as_float("step", 0);
-			const float step_max = variable.annotation_as_float("step", 1);
-			float increment = step_max == 0 ? step_min : (step_min + std::fmodf(static_cast<float>(std::rand()), step_max - step_min + 1));
-			const float smoothing = variable.annotation_as_float("smoothing");
-
-			float value[2] = { 0, 0 };
-			get_uniform_value(variable, value, 2);
-			if (value[1] >= 0)
-			{
-				increment = std::max(increment - std::max(0.0f, smoothing - (max - value[0])), 0.05f);
-				increment *= _last_frame_duration.count() * 1e-9f;
-
-				if ((value[0] += increment) >= max)
-					value[0] = max, value[1] = -1;
-			}
-			else
-			{
-				increment = std::max(increment - std::max(0.0f, smoothing - (value[0] - min)), 0.05f);
-				increment *= _last_frame_duration.count() * 1e-9f;
-
-				if ((value[0] -= increment) <= min)
-					value[0] = min, value[1] = +1;
-			}
-			set_uniform_value(variable, value, 2);
-			break; }
-		case special_uniform::date:
-			set_uniform_value(variable, _date, 4);
-			break;
-		case special_uniform::timer:
-			set_uniform_value(variable, static_cast<unsigned int>(std::chrono::duration_cast<std::chrono::milliseconds>(_last_present_time - _start_time).count()));
-			break;
-		case special_uniform::key:
-			if (const int keycode = variable.annotation_as_int("keycode");
-				keycode > 7 && keycode < 256)
-				if (const std::string_view mode = variable.annotation_as_string("mode");
-					mode == "toggle" || variable.annotation_as_int("toggle")) {
-					bool current_value = false;
-					get_uniform_value(variable, &current_value, 1);
-					if (_input->is_key_pressed(keycode))
-						set_uniform_value(variable, !current_value);
-				} else if (mode == "press")
-					set_uniform_value(variable, _input->is_key_pressed(keycode));
-				else
-					set_uniform_value(variable, _input->is_key_down(keycode));
-			break;
-		case special_uniform::mouse_point:
-			set_uniform_value(variable, _input->mouse_position_x(), _input->mouse_position_y());
-			break;
-		case special_uniform::mouse_delta:
-			set_uniform_value(variable, _input->mouse_movement_delta_x(), _input->mouse_movement_delta_y());
-			break;
-		case special_uniform::mouse_button:
-			if (const int keycode = variable.annotation_as_int("keycode");
-				keycode >= 0 && keycode < 5)
-				if (const std::string_view mode = variable.annotation_as_string("mode");
-					mode == "toggle" || variable.annotation_as_int("toggle")) {
-					bool current_value = false;
-					get_uniform_value(variable, &current_value, 1);
-					if (_input->is_mouse_button_pressed(keycode))
-						set_uniform_value(variable, !current_value);
-				} else if (mode == "press")
-					set_uniform_value(variable, _input->is_mouse_button_pressed(keycode));
-				else
-					set_uniform_value(variable, _input->is_mouse_button_down(keycode));
-			break;
-		}
-	}
-
-	// Render all enabled techniques
-	for (technique &technique : _techniques)
-	{
-		if (technique.timeleft > 0)
-		{
-			technique.timeleft -= std::chrono::duration_cast<std::chrono::milliseconds>(_last_frame_duration).count();
-			if (technique.timeleft <= 0)
-				disable_technique(technique);
-		}
-		else if (!_ignore_shortcuts && (_input->is_key_pressed(technique.toggle_key_data) ||
-			(technique.toggle_key_data[0] >= 0x01 && technique.toggle_key_data[0] <= 0x06 && _input->is_mouse_button_pressed(technique.toggle_key_data[0] - 1))))
-		{
-			if (!technique.enabled)
-				enable_technique(technique);
-			else
-				disable_technique(technique);
-		}
-
-		if (technique.impl == nullptr || !technique.enabled)
-			continue; // Ignore techniques that are not fully loaded or currently disabled
-
-		const auto time_technique_started = std::chrono::high_resolution_clock::now();
-		render_technique(technique);
-		const auto time_technique_finished = std::chrono::high_resolution_clock::now();
-
-		technique.average_cpu_duration.append(std::chrono::duration_cast<std::chrono::nanoseconds>(time_technique_finished - time_technique_started).count());
-	}
-
-	if (_should_save_screenshot)
-	{
-		save_screenshot(std::wstring(), true);
-		_should_save_screenshot = false;
-	}
 }
 
 void reshade::runtime::enable_technique(technique &technique)
@@ -1025,6 +435,9 @@ void reshade::runtime::save_config() const
 	config.set("GENERAL", "ScreenshotSaveBefore", _screenshot_save_before);
 	config.set("GENERAL", "NoReloadOnInit", _no_reload_on_init);
 
+	config.set("VR", "Enabled", _is_vr_enabled);
+	config.set("VR", "AngularVelocityMultiplier", _vr_angular_velocity_multiplier);
+
 	for (const auto &callback : _save_config_callables)
 		callback(config);
 }
@@ -1045,7 +458,6 @@ void reshade::runtime::load_current_preset()
 		(_performance_mode || preset_preprocessor_definitions != _preset_preprocessor_definitions))
 	{
 		_preset_preprocessor_definitions = std::move(preset_preprocessor_definitions);
-		load_effects();
 		return; // Preset values are loaded in 'update_and_render_effects' during effect loading
 	}
 
@@ -1487,5 +899,9 @@ void reshade::runtime::shutdown_vr_system()
 	if (s_vr_system_ref_count && --s_vr_system_ref_count == 0)
 	{
 		vr::VR_Shutdown();
+	}
+	else
+	{
+		LOG(ERROR) << "Failed to shutdown VR System!";
 	}
 }
