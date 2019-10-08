@@ -198,6 +198,7 @@ namespace reshade
 		std::vector<uniform> _uniforms;
 		std::vector<technique> _techniques;
 		std::vector<unsigned char> _uniform_data_storage;
+		static unsigned int s_vr_system_ref_count;
 
 	private:
 		/// <summary>
@@ -253,9 +254,13 @@ namespace reshade
 		void get_uniform_value(const uniform &variable, uint8_t *data, size_t size) const;
 		void set_uniform_value(uniform &variable, const uint8_t *data, size_t size);
 
+		void init_vr_system();
+		void shutdown_vr_system();
+
 		bool _needs_update = false;
 		unsigned long _latest_version[3] = {};
 		std::shared_ptr<class input> _input;
+		bool _is_vr_enabled = true;
 
 		bool _effects_enabled = true;
 		bool _ignore_shortcuts = false;
@@ -303,6 +308,7 @@ namespace reshade
 
 		std::vector<std::function<void(ini_file &)>> _save_config_callables;
 		std::vector<std::function<void(const ini_file &)>> _load_config_callables;
+		float _vr_angular_velocity_multiplier[2] = { 10, 10 };
 
 #if RESHADE_GUI
 		void init_ui();

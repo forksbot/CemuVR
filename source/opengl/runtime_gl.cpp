@@ -8,6 +8,7 @@
 #include "runtime_objects.hpp"
 #include "ini_file.hpp"
 #include <imgui.h>
+#include <openvr.h>
 
 namespace reshade::opengl
 {
@@ -251,6 +252,23 @@ void reshade::opengl::runtime_gl::on_present()
 	glBlitFramebuffer(0, 0, _width, _height, 0, 0, _width, _height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
 	runtime::on_present();
+
+	if (runtime::s_vr_system_ref_count)
+	{
+		const vr::Texture_t submit_textures[2] = {
+			{ reinterpret_cast<void*>(static_cast<uintptr_t>(_rbo[0])), vr::TextureType_OpenGL, vr::ColorSpace_Gamma },
+			{ reinterpret_cast<void*>(static_cast<uintptr_t>(_rbo[0])), vr::TextureType_OpenGL, vr::ColorSpace_Gamma }
+		};
+		const vr::VRTextureBounds_t submit_bounds[2] = {
+			{ 0.0f, 0.0f, 0.5f, 1.0f },
+			{ 0.5f, 0.0f, 1.0f, 1.0f }
+		};
+
+		vr::VRCompositor()->Submit(vr::Eye_Left, &submit_textures[0], &submit_bounds[0], vr::Submit_GlRenderBuffer);
+		vr::VRCompositor()->Submit(vr::Eye_Right, &submit_textures[1], &submit_bounds[1], vr::Submit_GlRenderBuffer);
+
+		vr::VRCompositor()->PostPresentHandoff();
+	}
 
 	// Apply previous state from application
 	_app_state.apply();

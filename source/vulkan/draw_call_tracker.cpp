@@ -1,6 +1,5 @@
 #include "draw_call_tracker.hpp"
 #include "log.hpp"
-#include "dxgi/format_utils.hpp"
 #include <math.h>
 #include <mutex>
 

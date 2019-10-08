@@ -19,10 +19,16 @@
 #include <stb_image_dds.h>
 #include <stb_image_write.h>
 #include <stb_image_resize.h>
+#include <version.h>
+#include <openvr.h>
 
 extern volatile long g_network_traffic;
 extern std::filesystem::path g_reshade_dll_path;
 extern std::filesystem::path g_target_executable_path;
+
+namespace reshade {
+	unsigned int runtime::s_vr_system_ref_count = 0;
+}
 
 static inline std::filesystem::path absolute_path(std::filesystem::path path)
 {
@@ -126,9 +132,13 @@ reshade::runtime::runtime() :
 	init_ui();
 #endif
 	load_config();
+
+	init_vr_system();
 }
 reshade::runtime::~runtime()
 {
+	shutdown_vr_system();
+
 	assert(_worker_threads.empty());
 	assert(!_is_initialized && _techniques.empty());
 
@@ -170,6 +180,8 @@ void reshade::runtime::on_reset()
 
 	_width = _height = 0;
 	_is_initialized = false;
+	shutdown_vr_system();
+	init_vr_system();
 }
 void reshade::runtime::on_present()
 {
@@ -185,6 +197,31 @@ void reshade::runtime::on_present()
 	_framecount++;
 	const auto current_time = std::chrono::high_resolution_clock::now();
 	_last_frame_duration = current_time - _last_present_time; _last_present_time = current_time;
+
+	// Get VR headset poses
+	vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount] = { };
+
+	if (vr::VRCompositor() &&
+		vr::VRCompositor()->WaitGetPoses(
+			poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0) == vr::EVRCompositorError::VRCompositorError_None)
+	{
+		for (vr::TrackedDeviceIndex_t i = 0; i < vr::k_unMaxTrackedDeviceCount; i++)
+		{
+			if (!poses[i].bPoseIsValid)
+			{
+				continue;
+			}
+
+			switch (vr::VRSystem()->GetTrackedDeviceClass(i))
+			{
+			case vr::TrackedDeviceClass_HMD:
+				// @TODO: Add implementation for providing headset tracking as motion source data.
+				break;
+			case vr::TrackedDeviceClass_Controller:
+				break;
+			}
+		}
+	}
 
 	// Lock input so it cannot be modified by other threads while we are reading it here
 	const auto input_lock = _input->lock();
@@ -1425,5 +1462,30 @@ void reshade::runtime::reset_uniform_value(uniform &variable)
 	else
 	{
 		memcpy(_uniform_data_storage.data() + variable.storage_offset, variable.initializer_value.as_uint, variable.size);
+	}
+}
+
+void reshade::runtime::init_vr_system()
+{
+	if (_is_vr_enabled && s_vr_system_ref_count++ == 0)
+	{
+		vr::EVRInitError e = vr::VRInitError_None;
+
+		vr::IVRSystem* m_pHMD = vr::VR_Init(&e, vr::EVRApplicationType::VRApplication_Scene);
+		vr::TrackedDevicePose_t m_rTrackedDevicePose[vr::k_unMaxTrackedDeviceCount];
+
+		if (e != vr::VRInitError_None || !vr::VRCompositor())
+		{
+			s_vr_system_ref_count = 0;
+
+			LOG(ERROR) << "Failed to initialize VR system with error code " << e << ".";
+		}
+	}
+}
+void reshade::runtime::shutdown_vr_system()
+{
+	if (s_vr_system_ref_count && --s_vr_system_ref_count == 0)
+	{
+		vr::VR_Shutdown();
 	}
 }

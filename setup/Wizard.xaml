@@ -26,20 +26,6 @@
 				Orientation="Horizontal"
 				HorizontalAlignment="Center">
 				<RadioButton
-					x:Name="ApiDirect3D9"
-					Content="Direct3D 9"
-					HorizontalAlignment="Center"
-					VerticalAlignment="Center"
-					Margin="8,0,0,0"
-					Click="OnApiChecked" />
-				<RadioButton
-					x:Name="ApiDirectXGI"
-					Content="Direct3D 10/11/12"
-					HorizontalAlignment="Center"
-					VerticalAlignment="Center"
-					Margin="8,0,0,0"
-					Click="OnApiChecked" />
-				<RadioButton
 					x:Name="ApiOpenGL"
 					Content="OpenGL"
 					HorizontalAlignment="Center"
@@ -79,7 +65,7 @@
 					Grid.Column="0"
 					HorizontalAlignment="Center"
 					FontSize="14"
-					Text="Select game to install to or uninstall from" />
+					Text="Select cemu.exe..." />
 				<TextBlock
 					x:Name="MessageDescription"
 					Grid.Row="1"
