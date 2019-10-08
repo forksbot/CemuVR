@@ -15,7 +15,7 @@ using System.Windows;
 using System.Windows.Input;
 using Microsoft.Win32;
 
-namespace ReShade.Setup
+namespace CemuVR.Setup
 {
 	public partial class WizardWindow
 	{

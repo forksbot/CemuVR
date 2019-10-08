@@ -10,7 +10,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 
-namespace ReShade.Setup
+namespace CemuVR.Setup
 {
 	public partial class SelectWindow : Window
 	{

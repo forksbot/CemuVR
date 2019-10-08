@@ -1,8 +1,8 @@
 ﻿<Window
 	xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
 	xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-	x:Class="ReShade.Setup.WizardWindow"
-	Title="Welcome"
+	x:Class="CemuVR.Setup.WizardWindow"
+	Title="CemuVR Setup"
 	Width="500"
 	Height="146"
 	WindowStyle="SingleBorderWindow"

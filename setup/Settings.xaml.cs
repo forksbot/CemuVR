@@ -9,7 +9,7 @@ using System.Windows.Markup;
 using Microsoft.Win32;
 using Microsoft.WindowsAPICodePack.Dialogs;
 
-namespace ReShade.Setup
+namespace CemuVR.Setup
 {
 	public partial class SettingsWindow
 	{
