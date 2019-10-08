@@ -88,6 +88,9 @@ reshade::vulkan::runtime_vk::runtime_vk(VkDevice device, VkPhysicalDevice physic
 
 	instance_table.GetPhysicalDeviceMemoryProperties(physical_device, &_memory_props);
 
+#if RESHADE_GUI
+	subscribe_to_ui("Vulkan", [this]() { draw_debug_menu(); });
+#endif
 	subscribe_to_load_config([this](const ini_file &config) {
 		config.get("VULKAN_BUFFER_DETECTION", "DepthBufferRetrievalMode", depth_buffer_before_clear);
 		config.get("VULKAN_BUFFER_DETECTION", "DepthBufferTextureFormat", depth_buffer_texture_format);
@@ -374,6 +377,11 @@ bool reshade::vulkan::runtime_vk::on_init(VkSwapchainKHR swapchain, const VkSwap
 		check_result(vk.CreateDescriptorSetLayout(_device, &create_info, nullptr, &_effect_ubo_layout)) false;
 	}
 
+#if RESHADE_GUI
+	if (!init_imgui_resources())
+		return false;
+#endif
+
 	return runtime::on_init(hwnd);
 }
 void reshade::vulkan::runtime_vk::on_reset()
@@ -418,6 +426,26 @@ void reshade::vulkan::runtime_vk::on_reset()
 
 	clear_DSV_iter = 1;
 
+#if RESHADE_GUI
+	vk.DestroyPipeline(_device, _imgui_pipeline, nullptr);
+	_imgui_pipeline = VK_NULL_HANDLE;
+	vk.DestroyPipelineLayout(_device, _imgui_pipeline_layout, nullptr);
+	_imgui_pipeline_layout = VK_NULL_HANDLE;
+	vk.DestroyDescriptorSetLayout(_device, _imgui_descriptor_set_layout, nullptr);
+	_imgui_descriptor_set_layout = VK_NULL_HANDLE;
+
+	vk.DestroySampler(_device, _imgui_font_sampler, nullptr);
+	_imgui_font_sampler = VK_NULL_HANDLE;
+	vk.DestroyBuffer(_device, _imgui_index_buffer, nullptr);
+	_imgui_index_buffer = VK_NULL_HANDLE;
+	_imgui_index_buffer_size = 0;
+	vk.DestroyBuffer(_device, _imgui_vertex_buffer, nullptr);
+	_imgui_vertex_buffer = VK_NULL_HANDLE;
+	_imgui_vertex_buffer_size = 0;
+	vk.FreeMemory(_device, _imgui_vertex_mem, nullptr);
+	_imgui_vertex_mem = VK_NULL_HANDLE;
+#endif
+
 	for (VkDeviceMemory allocation : _allocations)
 		vk.FreeMemory(_device, allocation, nullptr);
 	_allocations.clear();
@@ -437,6 +465,8 @@ void reshade::vulkan::runtime_vk::on_present(uint32_t swapchain_image_index, dra
 	_swap_index = swapchain_image_index;
 
 	// vk.QueueWaitIdle(_current_queue); // TODO
+
+	update_and_render_effects();
 
 #if RESHADE_VULKAN_CAPTURE_DEPTH_BUFFERS
 	detect_depth_source(tracker);
@@ -1060,6 +1090,38 @@ bool reshade::vulkan::runtime_vk::compile_effect(effect_data &effect)
 
 	return success;
 }
+void reshade::vulkan::runtime_vk::unload_effect(size_t id)
+{
+	// Wait for all GPU operations to finish so resources are no longer referenced
+	vk.DeviceWaitIdle(_device);
+
+	runtime::unload_effect(id);
+}
+void reshade::vulkan::runtime_vk::unload_effects()
+{
+	// Wait for all GPU operations to finish so resources are no longer referenced
+	vk.DeviceWaitIdle(_device);
+
+	runtime::unload_effects();
+
+	vk.ResetDescriptorPool(_device, _effect_descriptor_pool, 0);
+
+	for (const vulkan_effect_data &data : _effect_data)
+	{
+		vk.DestroyPipelineLayout(_device, data.pipeline_layout, nullptr);
+		vk.DestroyDescriptorSetLayout(_device, data.set_layout, nullptr);
+		vk.DestroyBuffer(_device, data.ubo, nullptr);
+		vk.FreeMemory(_device, data.ubo_mem, nullptr);
+	}
+
+	for (auto &[hash, sampler] : _effect_sampler_states)
+	{
+		vk.DestroySampler(_device, sampler, nullptr);
+	}
+
+	_effect_data.clear();
+	_effect_sampler_states.clear();
+}
 
 bool reshade::vulkan::runtime_vk::init_technique(technique &info, VkShaderModule module, const VkSpecializationInfo &spec_info)
 {
@@ -1390,6 +1452,435 @@ void reshade::vulkan::runtime_vk::render_technique(technique &technique)
 
 	execute_command_list_async(cmd_list);
 }
+
+#if RESHADE_GUI
+bool reshade::vulkan::runtime_vk::init_imgui_resources()
+{
+	vk_handle<VK_OBJECT_TYPE_SHADER_MODULE> vs_module(_device, vk);
+	vk_handle<VK_OBJECT_TYPE_SHADER_MODULE> fs_module(_device, vk);
+
+	VkPipelineShaderStageCreateInfo stages[2];
+	stages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+	stages[0].pName = "main";
+	stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	stages[1].pName = "main";
+
+	{   VkShaderModuleCreateInfo create_info { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+
+		const resources::data_resource vs = resources::load_data_resource(IDR_IMGUI_VS_SPIRV);
+		create_info.codeSize = vs.data_size;
+		create_info.pCode = static_cast<const uint32_t *>(vs.data);
+		check_result(vk.CreateShaderModule(_device, &create_info, nullptr, &vs_module)) false;
+		stages[0].module = vs_module;
+
+		const resources::data_resource ps = resources::load_data_resource(IDR_IMGUI_PS_SPIRV);
+		create_info.codeSize = ps.data_size;
+		create_info.pCode = static_cast<const uint32_t *>(ps.data);
+		check_result(vk.CreateShaderModule(_device, &create_info, nullptr, &fs_module)) false;
+		stages[1].module = fs_module;
+	}
+
+	{   VkSamplerCreateInfo create_info { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+		create_info.magFilter = VK_FILTER_LINEAR;
+		create_info.minFilter = VK_FILTER_LINEAR;
+		create_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+		create_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		create_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		create_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		create_info.minLod = -1000;
+		create_info.maxLod = +1000;
+
+		check_result(vk.CreateSampler(_device, &create_info, nullptr, &_imgui_font_sampler)) false;
+	}
+
+	{   VkDescriptorSetLayoutBinding bindings[1] = {};
+		bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		bindings[0].descriptorCount = 1;
+		bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		bindings[0].pImmutableSamplers = &_imgui_font_sampler;
+
+		VkDescriptorSetLayoutCreateInfo create_info { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+		create_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+		create_info.bindingCount = _countof(bindings);
+		create_info.pBindings = bindings;
+
+		check_result(vk.CreateDescriptorSetLayout(_device, &create_info, nullptr, &_imgui_descriptor_set_layout)) false;
+	}
+
+	{   const VkPushConstantRange push_constants[] = {
+			{ VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 4 }
+		};
+		const VkDescriptorSetLayout descriptor_layouts[] = {
+			_imgui_descriptor_set_layout
+		};
+
+		VkPipelineLayoutCreateInfo create_info { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+		create_info.setLayoutCount = _countof(descriptor_layouts);
+		create_info.pSetLayouts = descriptor_layouts;
+		create_info.pushConstantRangeCount = _countof(push_constants);
+		create_info.pPushConstantRanges = push_constants;
+
+		check_result(vk.CreatePipelineLayout(_device, &create_info, nullptr, &_imgui_pipeline_layout)) false;
+	}
+
+	VkVertexInputBindingDescription binding_desc[1] = {};
+	binding_desc[0].binding = 0;
+	binding_desc[0].stride = sizeof(ImDrawVert);
+	binding_desc[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+	VkVertexInputAttributeDescription attribute_desc[3] = {};
+	attribute_desc[0].location = 0;
+	attribute_desc[0].binding = binding_desc[0].binding;
+	attribute_desc[0].format = VK_FORMAT_R32G32_SFLOAT;
+	attribute_desc[0].offset = offsetof(ImDrawVert, pos);
+	attribute_desc[1].location = 1;
+	attribute_desc[1].binding = binding_desc[0].binding;
+	attribute_desc[1].format = VK_FORMAT_R32G32_SFLOAT;
+	attribute_desc[1].offset = offsetof(ImDrawVert, uv);
+	attribute_desc[2].location = 2;
+	attribute_desc[2].binding = binding_desc[0].binding;
+	attribute_desc[2].format = VK_FORMAT_R8G8B8A8_UNORM;
+	attribute_desc[2].offset = offsetof(ImDrawVert, col);
+
+	VkPipelineVertexInputStateCreateInfo vertex_info = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+	vertex_info.vertexBindingDescriptionCount = _countof(binding_desc);
+	vertex_info.pVertexBindingDescriptions = binding_desc;
+	vertex_info.vertexAttributeDescriptionCount = _countof(attribute_desc);
+	vertex_info.pVertexAttributeDescriptions = attribute_desc;
+
+	VkPipelineInputAssemblyStateCreateInfo ia_info = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+	ia_info.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+	VkPipelineViewportStateCreateInfo viewport_info = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+	viewport_info.viewportCount = 1;
+	viewport_info.scissorCount = 1;
+
+	VkPipelineRasterizationStateCreateInfo raster_info = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+	raster_info.polygonMode = VK_POLYGON_MODE_FILL;
+	raster_info.cullMode = VK_CULL_MODE_NONE;
+	raster_info.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+	raster_info.lineWidth = 1.0f;
+
+	VkPipelineMultisampleStateCreateInfo ms_info { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+	ms_info.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	VkPipelineColorBlendAttachmentState color_attachment = {};
+	color_attachment.blendEnable = VK_TRUE;
+	color_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	color_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	color_attachment.colorBlendOp = VK_BLEND_OP_ADD;
+	color_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	color_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+	color_attachment.alphaBlendOp = VK_BLEND_OP_ADD;
+	color_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+	VkPipelineColorBlendStateCreateInfo blend_info { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+	blend_info.attachmentCount = 1;
+	blend_info.pAttachments = &color_attachment;
+
+	VkPipelineDepthStencilStateCreateInfo depth_info { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+	depth_info.depthTestEnable = VK_FALSE;
+
+	VkDynamicState dynamic_states[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dynamic_state { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+	dynamic_state.dynamicStateCount = _countof(dynamic_states);
+	dynamic_state.pDynamicStates = dynamic_states;
+
+	VkGraphicsPipelineCreateInfo create_info { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+	create_info.stageCount = _countof(stages);
+	create_info.pStages = stages;
+	create_info.pVertexInputState = &vertex_info;
+	create_info.pInputAssemblyState = &ia_info;
+	create_info.pViewportState = &viewport_info;
+	create_info.pRasterizationState = &raster_info;
+	create_info.pMultisampleState = &ms_info;
+	create_info.pDepthStencilState = &depth_info;
+	create_info.pColorBlendState = &blend_info;
+	create_info.pDynamicState = &dynamic_state;
+	create_info.layout = _imgui_pipeline_layout;
+	create_info.renderPass = _default_render_pass[0];
+
+	check_result(vk.CreateGraphicsPipelines(_device, VK_NULL_HANDLE, 1, &create_info, nullptr, &_imgui_pipeline)) false;
+
+	return true;
+}
+
+void reshade::vulkan::runtime_vk::render_imgui_draw_data(ImDrawData *draw_data)
+{
+	bool resize_mem = false;
+
+	// Create and grow vertex/index buffers if needed
+	if (_imgui_index_buffer_size < uint32_t(draw_data->TotalIdxCount))
+	{
+		resize_mem = true;
+		_imgui_index_buffer_size = draw_data->TotalIdxCount + 10000;
+	}
+	if (_imgui_vertex_buffer_size < uint32_t(draw_data->TotalVtxCount))
+	{
+		resize_mem = true;
+		_imgui_vertex_buffer_size = draw_data->TotalVtxCount + 5000;
+	}
+
+	if (resize_mem)
+	{
+		if (_imgui_index_buffer != VK_NULL_HANDLE)
+			vk.DestroyBuffer(_device, _imgui_index_buffer, nullptr);
+		if (_imgui_vertex_buffer != VK_NULL_HANDLE)
+			vk.DestroyBuffer(_device, _imgui_vertex_buffer, nullptr);
+		if (_imgui_vertex_mem != VK_NULL_HANDLE)
+			vk.FreeMemory(_device, _imgui_vertex_mem, nullptr);
+		_imgui_vertex_mem = VK_NULL_HANDLE;
+
+		_imgui_index_buffer = create_buffer(
+			_imgui_index_buffer_size * sizeof(ImDrawIdx),
+			VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+			0);
+		_imgui_vertex_buffer = create_buffer(
+			_imgui_vertex_buffer_size * sizeof(ImDrawVert),
+			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+			0);
+
+		if (_imgui_index_buffer == VK_NULL_HANDLE ||
+			_imgui_vertex_buffer == VK_NULL_HANDLE)
+			return;
+
+		VkMemoryRequirements index_reqs = {};
+		vk.GetBufferMemoryRequirements(_device, _imgui_index_buffer, &index_reqs);
+		VkMemoryRequirements vertex_reqs = {};
+		vk.GetBufferMemoryRequirements(_device, _imgui_vertex_buffer, &vertex_reqs);
+
+		VkMemoryAllocateInfo alloc_info { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+		alloc_info.allocationSize = index_reqs.size + vertex_reqs.size;
+		alloc_info.memoryTypeIndex = find_memory_type_index(_memory_props, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, index_reqs.memoryTypeBits & vertex_reqs.memoryTypeBits);
+
+		check_result(vk.AllocateMemory(_device, &alloc_info, nullptr, &_imgui_vertex_mem));
+
+		VkBindBufferMemoryInfo bind_infos[2];
+		bind_infos[0] = { VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO };
+		bind_infos[0].buffer = _imgui_index_buffer;
+		bind_infos[0].memory = _imgui_vertex_mem;
+		bind_infos[0].memoryOffset = 0;
+		bind_infos[1] = { VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO };
+		bind_infos[1].buffer = _imgui_vertex_buffer;
+		bind_infos[1].memory = _imgui_vertex_mem;
+		bind_infos[1].memoryOffset = _imgui_vertex_mem_offset = index_reqs.size;
+
+		check_result(vk.BindBufferMemory2(_device, _countof(bind_infos), bind_infos));
+	}
+
+	ImDrawIdx *idx_dst; ImDrawVert *vtx_dst;
+	check_result(vk.MapMemory(_device, _imgui_vertex_mem, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void **>(&idx_dst)));
+	vtx_dst = reinterpret_cast<ImDrawVert *>(reinterpret_cast<uint8_t *>(idx_dst) + _imgui_vertex_mem_offset);
+
+	for (int n = 0; n < draw_data->CmdListsCount; n++)
+	{
+		const ImDrawList *draw_list = draw_data->CmdLists[n];
+		memcpy(idx_dst, draw_list->IdxBuffer.Data, draw_list->IdxBuffer.Size * sizeof(ImDrawIdx));
+		memcpy(vtx_dst, draw_list->VtxBuffer.Data, draw_list->VtxBuffer.Size * sizeof(ImDrawVert));
+		idx_dst += draw_list->IdxBuffer.Size;
+		vtx_dst += draw_list->VtxBuffer.Size;
+	}
+
+	vk.UnmapMemory(_device, _imgui_vertex_mem);
+
+	const VkCommandBuffer cmd_list = create_command_list();
+
+	{   VkRenderPassBeginInfo begin_info { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+		begin_info.renderPass = _default_render_pass[0];
+		begin_info.framebuffer = _swapchain_frames[_swap_index * 2];
+		begin_info.renderArea.extent = _render_area;
+		vk.CmdBeginRenderPass(cmd_list, &begin_info, VK_SUBPASS_CONTENTS_INLINE);
+	}
+
+	// Setup orthographic projection matrix
+	const float scale[2] = {
+		2.0f / draw_data->DisplaySize.x,
+		2.0f / draw_data->DisplaySize.y
+	};
+	const float translate[2] = {
+		-1.0f - draw_data->DisplayPos.x * scale[0],
+		-1.0f - draw_data->DisplayPos.y * scale[1]
+	};
+	vk.CmdPushConstants(cmd_list, _imgui_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, sizeof(float) * 0, sizeof(float) * 2, scale);
+	vk.CmdPushConstants(cmd_list, _imgui_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, sizeof(float) * 2, sizeof(float) * 2, translate);
+
+	// Setup render state and render draw lists
+	vk.CmdBindIndexBuffer(cmd_list, _imgui_index_buffer, 0, sizeof(ImDrawIdx) == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+	const VkDeviceSize offset = 0;
+	vk.CmdBindVertexBuffers(cmd_list, 0, 1, &_imgui_vertex_buffer, &offset);
+	const VkViewport viewport = { 0.0f, 0.0f, draw_data->DisplaySize.x, draw_data->DisplaySize.y, 0.0f, 1.0f };
+	vk.CmdSetViewport(cmd_list, 0, 1, &viewport);
+	vk.CmdBindPipeline(cmd_list, VK_PIPELINE_BIND_POINT_GRAPHICS, _imgui_pipeline);
+
+	uint32_t vtx_offset = 0, idx_offset = 0;
+	for (int n = 0; n < draw_data->CmdListsCount; ++n)
+	{
+		const ImDrawList *const draw_list = draw_data->CmdLists[n];
+
+		for (const ImDrawCmd &cmd : draw_list->CmdBuffer)
+		{
+			assert(cmd.TextureId != 0);
+			assert(cmd.UserCallback == nullptr);
+
+			const VkRect2D scissor_rect = {
+				// Offset
+				{ static_cast<int32_t>(cmd.ClipRect.x - draw_data->DisplayPos.x),
+				  static_cast<int32_t>(cmd.ClipRect.y - draw_data->DisplayPos.y) },
+				// Extent
+				{ static_cast<uint32_t>(cmd.ClipRect.z - cmd.ClipRect.x),
+				  static_cast<uint32_t>(cmd.ClipRect.w - cmd.ClipRect.y) }
+			};
+			vk.CmdSetScissor(cmd_list, 0, 1, &scissor_rect);
+
+			auto tex_data = static_cast<const vulkan_tex_data *>(cmd.TextureId);
+
+			VkWriteDescriptorSet write { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+			write.dstBinding = 0;
+			write.descriptorCount = 1;
+			write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			const VkDescriptorImageInfo image_info { _imgui_font_sampler, tex_data->view[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+			write.pImageInfo = &image_info;
+			vk.CmdPushDescriptorSetKHR(cmd_list, VK_PIPELINE_BIND_POINT_GRAPHICS, _imgui_pipeline_layout, 0, 1, &write);
+
+			vk.CmdDrawIndexed(cmd_list, cmd.ElemCount, 1, idx_offset, vtx_offset, 0);
+
+			idx_offset += cmd.ElemCount;
+		}
+
+		vtx_offset += draw_list->VtxBuffer.Size;
+	}
+
+	vk.CmdEndRenderPass(cmd_list);
+
+	execute_command_list_async(cmd_list);
+}
+
+void reshade::vulkan::runtime_vk::draw_debug_menu()
+{
+	ImGui::Text("MSAA is %s", _is_multisampling_enabled ? "active" : "inactive");
+	ImGui::Spacing();
+
+	ImGui::Spacing();
+	ImGui::Spacing();
+
+#if RESHADE_VULKAN_CAPTURE_DEPTH_BUFFERS
+	if (ImGui::CollapsingHeader("Depth and Intermediate Buffers", ImGuiTreeNodeFlags_DefaultOpen))
+	{
+		bool modified = false;
+		modified |= ImGui::Combo("Depth Texture Format", &depth_buffer_texture_format, "All\0D16\0D16S8\0D24S8\0D32F\0D32FS8\0");
+
+		if (modified)
+		{
+			runtime::save_config();
+			_current_tracker->reset();
+			create_depthstencil_replacement(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_FORMAT_UNDEFINED, VK_NULL_HANDLE);
+			return;
+		}
+
+		modified |= ImGui::Checkbox("Copy depth buffer just before it is cleared", &depth_buffer_before_clear);
+
+		if (depth_buffer_before_clear)
+		{
+			ImGui::Spacing();
+			ImGui::Spacing();
+
+			if (ImGui::Checkbox("Make more copies (can help if not retrieving the depth buffer in the current copies)", &depth_buffer_more_copies))
+			{
+				cleared_depth_buffer_index = 0;
+				modified = true;
+			}
+
+			ImGui::Spacing();
+			ImGui::Spacing();
+
+			if (ImGui::Checkbox("Extended depth buffer detection", &extended_depth_buffer_detection))
+			{
+				cleared_depth_buffer_index = 0;
+				modified = true;
+			}
+
+			_current_tracker->keep_cleared_depth_textures();
+
+			ImGui::Spacing();
+			ImGui::TextUnformatted("Depth Buffers:");
+
+			unsigned int current_index = 1;
+
+			for (const auto &it : _current_tracker->cleared_depth_textures())
+			{
+				char label[512] = "";
+				sprintf_s(label, "%s%2u", (current_index == cleared_depth_buffer_index ? "> " : "  "), current_index);
+
+				if (bool value = cleared_depth_buffer_index == current_index; ImGui::Checkbox(label, &value))
+				{
+					cleared_depth_buffer_index = value ? current_index : 0;
+					modified = true;
+				}
+
+				ImGui::SameLine();
+
+				ImGui::Text("=> 0x%p | 0x%p | %ux%u", it.second.src_depthstencil, it.second.src_image, it.second.src_image_info.extent.width, it.second.src_image_info.extent.height);
+
+				if (it.second.dest_image != VK_NULL_HANDLE)
+				{
+					ImGui::SameLine();
+
+					ImGui::Text("=> %p", it.second.dest_image);
+				}
+
+				current_index++;
+			}
+		}
+		else if (!_current_tracker->depth_buffer_counters().empty())
+		{
+			ImGui::Spacing();
+			ImGui::TextUnformatted("Depth Buffers: (intermediate buffer draw calls in parentheses)");
+
+			for (const auto &[depthstencil, snapshot] : _current_tracker->depth_buffer_counters())
+			{
+				char label[512] = "";
+				sprintf_s(label, "%s0x%p", (depthstencil == _depthstencil ? "> " : "  "), depthstencil);
+
+				if (bool value = _best_depth_stencil_overwrite == depthstencil; ImGui::Checkbox(label, &value))
+				{
+					_best_depth_stencil_overwrite = value ? depthstencil : VK_NULL_HANDLE;
+
+					if (_best_depth_stencil_overwrite != VK_NULL_HANDLE && snapshot.depthstencil_replacement != VK_NULL_HANDLE)
+						create_depthstencil_replacement(_best_depth_stencil_overwrite, snapshot.depthstencil_replacement, snapshot.image, snapshot.image_info.format, snapshot.image_info.usage);
+				}
+
+				ImGui::SameLine();
+
+				std::string additional_view_label;
+
+				if (!snapshot.additional_views.empty())
+				{
+					additional_view_label += '(';
+
+					for (auto const &[view, stats] : snapshot.additional_views)
+						additional_view_label += std::to_string(stats.drawcalls) + ", ";
+
+					// Remove last ", " from string
+					additional_view_label.pop_back();
+					additional_view_label.pop_back();
+
+					additional_view_label += ')';
+				}
+
+				VkExtent3D extent = snapshot.image_info.extent;
+
+				ImGui::Text("| %ux%u| %5u draw calls ==> %8u vertices, %2u additional render target%c %s", extent.width, extent.height, snapshot.stats.drawcalls, snapshot.stats.vertices, snapshot.additional_views.size(), snapshot.additional_views.size() != 1 ? 's' : ' ', additional_view_label.c_str());
+			}
+		}
+
+		if (modified)
+			runtime::save_config();
+	}
+#endif
+}
+#endif
 
 #if RESHADE_VULKAN_CAPTURE_DEPTH_BUFFERS
 void reshade::vulkan::runtime_vk::detect_depth_source(draw_call_tracker &tracker)

@@ -22,3 +22,6 @@
 [submodule "deps/openvr"]
 	path = deps/openvr
 	url = https://github.com/ValveSoftware/openvr.git
+[submodule "deps/Depth3D"]
+	path = deps/Depth3D
+	url = https://github.com/BlueSkyDefender/Depth3D.git

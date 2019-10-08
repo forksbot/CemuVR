@@ -80,15 +80,8 @@ namespace CemuVR.Setup
 					}
 				}
 			}
-			try {
-				return new ZipArchive(output, ZipArchiveMode.Read, false);
-			}
-			catch (Exception e)
-			{
-				Console.WriteLine(e.Message);
-				throw e;
-			}
-			
+
+			return new ZipArchive(output, ZipArchiveMode.Read, false);
 		}
 
 		void ShowMessage(string title, string message, string description = null, bool done = false, int exitCode = -1)
@@ -197,6 +190,8 @@ namespace CemuVR.Setup
 
 			string targetDir = Path.GetDirectoryName(_targetPath);
 			string pathModule = _targetModulePath = Path.Combine(targetDir, nameModule);
+			string cemuVRDir = Path.Combine(targetDir, "cemu-vr");
+			string openVRModule = Path.Combine(targetDir, "openvr_api.dll");
 
 			_configPath = Path.ChangeExtension(pathModule, ".ini");
 			if (!File.Exists(_configPath))
@@ -211,12 +206,15 @@ namespace CemuVR.Setup
 					try
 					{
 						File.Delete(pathModule);
+						File.Delete(openVRModule);
 						if (File.Exists(_configPath))
 							File.Delete(_configPath);
 						if (File.Exists(Path.ChangeExtension(pathModule, ".log")))
 							File.Delete(Path.ChangeExtension(pathModule, ".log"));
 						if (Directory.Exists(Path.Combine(targetDir, "reshade-shaders")))
 							Directory.Delete(Path.Combine(targetDir, "reshade-shaders"), true);
+						if (Directory.Exists(cemuVRDir))
+							Directory.Delete(cemuVRDir, true);
 					}
 					catch (Exception ex)
 					{
@@ -238,12 +236,24 @@ namespace CemuVR.Setup
 			{
 				using (ZipArchive zip = ExtractArchive())
 				{
-					if (zip.Entries.Count != 4)
+					if (zip.Entries.Count != 6)
 						throw new FileFormatException("Expected ReShade archive to contain ReShade DLLs");
 
 					using (Stream input = zip.Entries[_targetPEInfo.Type == PEInfo.BinaryType.IMAGE_FILE_MACHINE_AMD64 ? 2 : 0].Open())
 						using (FileStream output = File.Create(pathModule))
 							input.CopyTo(output);
+
+					using (Stream openVRArchive = zip.Entries[4].Open())
+						using (FileStream openVRDLL = File.Create(openVRModule))
+							openVRArchive.CopyTo(openVRDLL);
+
+					if (!Directory.Exists(cemuVRDir))
+					{
+						Directory.CreateDirectory(cemuVRDir);
+					}
+					using (Stream superDepthArchive = zip.Entries[5].Open())
+						using (FileStream superDepthFX = File.Create(Path.Combine(targetDir, "cemu-vr", "SuperDepth3D_2.0.6_VR.fx")))
+							superDepthArchive.CopyTo(superDepthFX);
 				}
 			}
 			catch (Exception ex)
@@ -287,7 +297,7 @@ namespace CemuVR.Setup
 				{
 					string targetDirectory = Path.GetDirectoryName(_targetPath);
 
-					WriteSearchPaths(".\\", ".\\");
+					WriteSearchPaths(".\\cemu-vr,.\\", ".\\");
 				}
 
 				ShowMessage("Succeeded!", "Successfully installed.", null, true, 0);

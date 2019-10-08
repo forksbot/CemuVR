@@ -45,11 +45,18 @@ namespace reshade::opengl
 		void update_texture_references(texture_reference type);
 
 		bool compile_effect(effect_data &effect) override;
+		void unload_effects() override;
 
 		bool add_sampler(const reshadefx::sampler_info &info, struct opengl_technique_data &technique_init);
 		bool init_technique(technique &info, const struct opengl_technique_data &technique_init, const std::unordered_map<std::string, GLuint> &entry_points, std::string &errors);
 
 		void render_technique(technique &technique) override;
+
+#if RESHADE_GUI
+		void init_imgui_resources();
+		void render_imgui_draw_data(ImDrawData *data) override;
+		void draw_debug_menu();
+#endif
 
 		void detect_depth_source();
 
@@ -59,7 +66,12 @@ namespace reshade::opengl
 
 		enum BUF
 		{
+#if RESHADE_GUI
+			VBO_IMGUI,
+			IBO_IMGUI,
+#else
 			BUF_DUMMY,
+#endif
 				NUM_BUF
 		};
 		enum TEX
@@ -72,6 +84,9 @@ namespace reshade::opengl
 		enum VAO
 		{
 			VAO_FX,
+#if RESHADE_GUI
+			VAO_IMGUI,
+#endif
 				NUM_VAO
 		};
 		enum FBO
@@ -93,6 +108,11 @@ namespace reshade::opengl
 		GLuint _vao[NUM_VAO] = {};
 		GLuint _fbo[NUM_FBO] = {};
 		GLuint _rbo[NUM_RBO] = {};
+#if RESHADE_GUI
+		GLuint _imgui_program = 0;
+		int _imgui_uniform_tex = 0;
+		int _imgui_uniform_proj = 0;
+#endif
 		std::vector<GLuint> _reserved_texture_names;
 		std::unordered_map<size_t, GLuint> _effect_sampler_states;
 		std::vector<std::pair<GLuint, GLsizeiptr>> _effect_ubos;

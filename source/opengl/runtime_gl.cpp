@@ -100,6 +100,9 @@ reshade::opengl::runtime_gl::runtime_gl()
 		}
 	}
 
+#if RESHADE_GUI
+	subscribe_to_ui("OpenGL", [this]() { draw_debug_menu(); });
+#endif
 	subscribe_to_load_config([this](const ini_file &config) {
 		// Reserve a fixed amount of texture names by default to work around issues in old OpenGL games
 		// This hopefully should not affect performance much in other games
@@ -177,6 +180,10 @@ bool reshade::opengl::runtime_gl::on_init(HWND hwnd, unsigned int width, unsigne
 	glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, _tex[TEX_BACK_SRGB], 0);
 	assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
 
+#if RESHADE_GUI
+	init_imgui_resources();
+#endif
+
 	_app_state.apply();
 
 	return runtime::on_init(hwnd);
@@ -200,7 +207,10 @@ void reshade::opengl::runtime_gl::on_reset()
 
 	_depth_source = 0;
 
-	LOG(INFO) << "on_reset() called.";
+#if RESHADE_GUI
+	glDeleteProgram(_imgui_program);
+	_imgui_program = 0;
+#endif
 }
 
 void reshade::opengl::runtime_gl::on_present()
@@ -229,6 +239,8 @@ void reshade::opengl::runtime_gl::on_present()
 	// Set clip space to something consistent
 	if (gl3wProcs.gl.ClipControl != nullptr)
 		glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+
+	update_and_render_effects();
 
 	// Copy results from RBO to back buffer
 	glDisable(GL_SCISSOR_TEST);
@@ -260,8 +272,6 @@ void reshade::opengl::runtime_gl::on_present()
 
 	// Apply previous state from application
 	_app_state.apply();
-
-	LOG(INFO) << "on_present() called.";
 }
 
 void reshade::opengl::runtime_gl::on_draw_call(unsigned int vertices)
@@ -284,8 +294,6 @@ void reshade::opengl::runtime_gl::on_draw_call(unsigned int vertices)
 		it->second.num_vertices += vertices;
 		it->second.num_drawcalls = _drawcalls;
 	}
-
-	LOG(INFO) << "on_draw_call() called.";
 }
 void reshade::opengl::runtime_gl::on_fbo_attachment(GLenum attachment, GLenum target, GLuint object, GLint level)
 {
@@ -354,8 +362,6 @@ void reshade::opengl::runtime_gl::on_fbo_attachment(GLenum attachment, GLenum ta
 	}
 
 	_depth_source_table.emplace(id, info);
-
-	LOG(INFO) << "on_fbo_attachment() called.";
 }
 
 bool reshade::opengl::runtime_gl::capture_screenshot(uint8_t *buffer) const
@@ -647,6 +653,18 @@ bool reshade::opengl::runtime_gl::compile_effect(effect_data &effect)
 		glDeleteShader(it.second);
 
 	return success;
+}
+void reshade::opengl::runtime_gl::unload_effects()
+{
+	runtime::unload_effects();
+
+	for (const auto &info : _effect_ubos)
+		glDeleteBuffers(1, &info.first);
+	_effect_ubos.clear();
+
+	for (const auto &info : _effect_sampler_states)
+		glDeleteSamplers(1, &info.second);
+	_effect_sampler_states.clear();
 }
 
 bool reshade::opengl::runtime_gl::add_sampler(const reshadefx::sampler_info &info, opengl_technique_data &technique_init)
@@ -1051,6 +1069,147 @@ void reshade::opengl::runtime_gl::render_technique(technique &technique)
 		glEndQuery(GL_TIME_ELAPSED);
 	technique_data.query_in_flight = true;
 }
+
+#if RESHADE_GUI
+void reshade::opengl::runtime_gl::init_imgui_resources()
+{
+	assert(_app_state.has_state);
+
+	const GLchar *vertex_shader[] = {
+		"#version 330\n"
+		"uniform mat4 ProjMtx;\n"
+		"in vec2 Position, UV;\n"
+		"in vec4 Color;\n"
+		"out vec2 Frag_UV;\n"
+		"out vec4 Frag_Color;\n"
+		"void main()\n"
+		"{\n"
+		"	Frag_UV = UV * vec2(1.0, -1.0) + vec2(0.0, 1.0);\n" // Texture coordinates were flipped in 'update_texture'
+		"	Frag_Color = Color;\n"
+		"	gl_Position = ProjMtx * vec4(Position.xy, 0, 1);\n"
+		"}\n"
+	};
+	const GLchar *fragment_shader[] = {
+		"#version 330\n"
+		"uniform sampler2D Texture;\n"
+		"in vec2 Frag_UV;\n"
+		"in vec4 Frag_Color;\n"
+		"out vec4 Out_Color;\n"
+		"void main()\n"
+		"{\n"
+		"	Out_Color = Frag_Color * texture(Texture, Frag_UV.st);\n"
+		"}\n"
+	};
+
+	const GLuint imgui_vs = glCreateShader(GL_VERTEX_SHADER);
+	glShaderSource(imgui_vs, 1, vertex_shader, 0);
+	glCompileShader(imgui_vs);
+	const GLuint imgui_fs = glCreateShader(GL_FRAGMENT_SHADER);
+	glShaderSource(imgui_fs, 1, fragment_shader, 0);
+	glCompileShader(imgui_fs);
+
+	_imgui_program = glCreateProgram();
+	glAttachShader(_imgui_program, imgui_vs);
+	glAttachShader(_imgui_program, imgui_fs);
+	glLinkProgram(_imgui_program);
+	glDeleteShader(imgui_vs);
+	glDeleteShader(imgui_fs);
+
+	_imgui_uniform_tex  = glGetUniformLocation(_imgui_program, "Texture");
+	_imgui_uniform_proj = glGetUniformLocation(_imgui_program, "ProjMtx");
+
+	const int attrib_pos = glGetAttribLocation(_imgui_program, "Position");
+	const int attrib_uv  = glGetAttribLocation(_imgui_program, "UV");
+	const int attrib_col = glGetAttribLocation(_imgui_program, "Color");
+
+	glBindBuffer(GL_ARRAY_BUFFER, _buf[VBO_IMGUI]);
+	glBindVertexArray(_vao[VAO_IMGUI]);
+	glEnableVertexAttribArray(attrib_pos);
+	glEnableVertexAttribArray(attrib_uv );
+	glEnableVertexAttribArray(attrib_col);
+	glVertexAttribPointer(attrib_pos, 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), reinterpret_cast<GLvoid *>(offsetof(ImDrawVert, pos)));
+	glVertexAttribPointer(attrib_uv , 2, GL_FLOAT, GL_FALSE, sizeof(ImDrawVert), reinterpret_cast<GLvoid *>(offsetof(ImDrawVert, uv )));
+	glVertexAttribPointer(attrib_col, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(ImDrawVert), reinterpret_cast<GLvoid *>(offsetof(ImDrawVert, col)));
+}
+
+void reshade::opengl::runtime_gl::render_imgui_draw_data(ImDrawData *draw_data)
+{
+	assert(_app_state.has_state);
+
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_DEPTH_TEST);
+	glFrontFace(GL_CCW);
+	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glBlendEquation(GL_FUNC_ADD);
+	glEnable(GL_SCISSOR_TEST);
+	glDisable(GL_STENCIL_TEST);
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	glDepthMask(GL_FALSE);
+	glActiveTexture(GL_TEXTURE0); // Bind texture at location zero below
+	glUseProgram(_imgui_program);
+	glBindSampler(0, 0); // Do not use separate sampler object, since state is already set in texture
+	glBindVertexArray(_vao[VAO_IMGUI]);
+
+	glViewport(0, 0, GLsizei(draw_data->DisplaySize.x), GLsizei(draw_data->DisplaySize.y));
+
+	const float ortho_projection[16] = {
+		2.0f / draw_data->DisplaySize.x, 0.0f,   0.0f, 0.0f,
+		0.0f, -2.0f / draw_data->DisplaySize.y,  0.0f, 0.0f,
+		0.0f,                            0.0f,  -1.0f, 0.0f,
+		-(2 * draw_data->DisplayPos.x + draw_data->DisplaySize.x) / draw_data->DisplaySize.x,
+		+(2 * draw_data->DisplayPos.y + draw_data->DisplaySize.y) / draw_data->DisplaySize.y, 0.0f, 1.0f,
+	};
+
+	glUniform1i(_imgui_uniform_tex, 0); // Set to GL_TEXTURE0
+	glUniformMatrix4fv(_imgui_uniform_proj, 1, GL_FALSE, ortho_projection);
+
+	for (int n = 0; n < draw_data->CmdListsCount; ++n)
+	{
+		const ImDrawIdx *index_offset = 0;
+		ImDrawList *const draw_list = draw_data->CmdLists[n];
+
+		glBindBuffer(GL_ARRAY_BUFFER, _buf[VBO_IMGUI]);
+		glBufferData(GL_ARRAY_BUFFER, draw_list->VtxBuffer.Size * sizeof(ImDrawVert), draw_list->VtxBuffer.Data, GL_STREAM_DRAW);
+
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _buf[IBO_IMGUI]);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, draw_list->IdxBuffer.Size * sizeof(ImDrawIdx), draw_list->IdxBuffer.Data, GL_STREAM_DRAW);
+
+		for (const ImDrawCmd &cmd : draw_list->CmdBuffer)
+		{
+			assert(cmd.TextureId != 0);
+			assert(cmd.UserCallback == nullptr);
+
+			const ImVec4 scissor_rect(
+				cmd.ClipRect.x - draw_data->DisplayPos.x,
+				cmd.ClipRect.y - draw_data->DisplayPos.y,
+				cmd.ClipRect.z - draw_data->DisplayPos.x,
+				cmd.ClipRect.w - draw_data->DisplayPos.y);
+			glScissor(
+				static_cast<GLint>(scissor_rect.x),
+				static_cast<GLint>(_height - scissor_rect.w),
+				static_cast<GLint>(scissor_rect.z - scissor_rect.x),
+				static_cast<GLint>(scissor_rect.w - scissor_rect.y));
+
+			glBindTexture(GL_TEXTURE_2D, static_cast<const opengl_tex_data *>(cmd.TextureId)->id[0]);
+
+			glDrawElements(GL_TRIANGLES, cmd.ElemCount, sizeof(ImDrawIdx) == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT, index_offset);
+
+			index_offset += cmd.ElemCount;
+		}
+	}
+}
+
+void reshade::opengl::runtime_gl::draw_debug_menu()
+{
+	if (ImGui::Checkbox("Force default depth buffer", &_force_main_depth_buffer) && _force_main_depth_buffer)
+	{
+		_depth_source = 0;
+		update_texture_references(texture_reference::depth_buffer);
+	}
+}
+#endif
 
 void reshade::opengl::runtime_gl::detect_depth_source()
 {

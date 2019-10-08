@@ -12,6 +12,13 @@
 #include <functional>
 #include <filesystem>
 
+#if RESHADE_GUI
+#include "gui_code_editor.hpp"
+
+struct ImDrawData;
+struct ImGuiContext;
+#endif
+
 namespace reshade
 {
 	class ini_file; // Some forward declarations to keep number of includes small
@@ -89,6 +96,15 @@ namespace reshade
 		/// </summary>
 		/// <param name="variable">The variable to update.</param>
 		void reset_uniform_value(uniform &variable);
+
+#if RESHADE_GUI
+		/// <summary>
+		/// Register a function to be called when the UI is drawn.
+		/// </summary>
+		/// <param name="label">Name of the widget.</param>
+		/// <param name="function">The callback function.</param>
+		void subscribe_to_ui(std::string label, std::function<void()> function) { _menu_callables.push_back({ label, function }); }
+#endif
 		/// <summary>
 		/// Register a function to be called when user configuration is loaded.
 		/// </summary>
@@ -117,6 +133,26 @@ namespace reshade
 		/// Callback function called every frame.
 		/// </summary>
 		void on_present();
+
+		/// <summary>
+		/// Compile effect from the specified source file and initialize textures, uniforms and techniques.
+		/// </summary>
+		/// <param name="path">The path to an effect source code file.</param>
+		/// <param name="out_id">The ID of the effect.</param>
+		void load_effect(const std::filesystem::path &path, size_t &out_id);
+		/// <summary>
+		/// Load all effects found in the effect search paths.
+		/// </summary>
+		virtual void load_effects();
+		/// <summary>
+		/// Unload the specified effect.
+		/// </summary>
+		/// <param name="id">The ID of the effect.</param>
+		virtual void unload_effect(size_t id);
+		/// <summary>
+		/// Unload all effects currently loaded.
+		/// </summary>
+		virtual void unload_effects();
 		/// <summary>
 		/// Load image files and update textures with image data.
 		/// </summary>
@@ -129,14 +165,24 @@ namespace reshade
 		virtual bool compile_effect(effect_data &effect) = 0;
 
 		/// <summary>
+		/// Apply post-processing effects to the frame.
+		/// </summary>
+		void update_and_render_effects();
+		/// <summary>
 		/// Render all passes in a technique.
 		/// </summary>
 		/// <param name="technique">The technique to render.</param>
 		virtual void render_technique(technique &technique) = 0;
+#if RESHADE_GUI
+		/// <summary>
+		/// Render command lists obtained from ImGui.
+		/// </summary>
+		/// <param name="data">The draw data to render.</param>
+		virtual void render_imgui_draw_data(ImDrawData *draw_data) = 0;
+#endif
 
 		bool _is_initialized = false;
 		bool _has_high_network_activity = false;
-		bool _is_vr_enabled = true;
 		unsigned int _width = 0;
 		unsigned int _height = 0;
 		unsigned int _window_width = 0;
@@ -155,9 +201,6 @@ namespace reshade
 		static unsigned int s_vr_system_ref_count;
 
 	private:
-		// @TODO: Add documentation
-		void init_vr_system();
-		void shutdown_vr_system();
 		/// <summary>
 		/// Compare current version against the latest published one.
 		/// </summary>
@@ -267,7 +310,67 @@ namespace reshade
 		std::vector<std::function<void(const ini_file &)>> _load_config_callables;
 		float _vr_angular_velocity_multiplier[2] = { 10, 10 };
 
-		//@TODO: Add documentation
-		float _vr_angular_velocity_multiplier[2] = { 10, 10 };
+#if RESHADE_GUI
+		void init_ui();
+		void deinit_ui();
+		void build_font_atlas();
+		void destroy_font_atlas();
+
+		void draw_ui();
+
+		void draw_overlay_menu_home();
+		void draw_overlay_menu_settings();
+		void draw_overlay_menu_statistics();
+		void draw_overlay_menu_log();
+		void draw_overlay_menu_about();
+		void draw_code_editor();
+		void draw_overlay_variable_editor();
+		void draw_overlay_technique_editor();
+		void draw_preset_explorer();
+
+		std::vector<std::pair<std::string, std::function<void()>>> _menu_callables;
+		std::unique_ptr<texture> _imgui_font_atlas;
+		ImGuiContext *_imgui_context = nullptr;
+		size_t _focused_effect = std::numeric_limits<size_t>::max();
+		size_t _selected_effect = std::numeric_limits<size_t>::max();
+		size_t _selected_technique = std::numeric_limits<size_t>::max();
+		int _input_processing_mode = 2;
+		int _style_index = 2;
+		int _editor_style_index = 0;
+		int _font_size = 13;
+		int _editor_font_size = 13;
+		int _clock_format = 0;
+		std::filesystem::path _font;
+		std::filesystem::path _editor_font;
+		unsigned int _menu_key_data[4];
+		bool _show_menu = false;
+		bool _show_clock = false;
+		bool _show_fps = false;
+		bool _show_frametime = false;
+		bool _show_splash = true;
+		bool _show_code_editor = false;
+		bool _show_screenshot_message = true;
+		bool _no_font_scaling = false;
+		bool _log_wordwrap = false;
+		bool _variable_editor_tabs = false;
+		bool _selected_effect_changed = false;
+		bool _rebuild_font_atlas = false;
+		bool _was_preprocessor_popup_edited = false;
+		float _fps_col[4] = { 1.0f, 1.0f, 0.784314f, 1.0f };
+		float _fps_scale = 1.0f;
+		float _variable_editor_height = 0.0f;
+		unsigned int _tutorial_index = 0;
+		unsigned int _effects_expanded_state = 2;
+		char _effect_filter_buffer[64] = {};
+		std::filesystem::path _file_selection_path;
+		imgui_code_editor _editor;
+		unsigned int _preview_size[2] = {};
+		void *_preview_texture = nullptr;
+
+		// Used by preset explorer
+		bool _browse_path_is_input_mode = false;
+		bool _current_preset_is_covered = true;
+		std::filesystem::path _current_browse_path;
+#endif
 	};
 }
