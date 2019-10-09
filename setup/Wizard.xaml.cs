@@ -236,25 +236,14 @@ namespace CemuVR.Setup
 			{
 				using (ZipArchive zip = ExtractArchive())
 				{
-					if (zip.Entries.Count != 6)
+					if (zip.Entries.Count != 4)
 						throw new FileFormatException("Expected ReShade archive to contain ReShade DLLs");
 
 					using (Stream input = zip.Entries[_targetPEInfo.Type == PEInfo.BinaryType.IMAGE_FILE_MACHINE_AMD64 ? 2 : 0].Open())
-						using (FileStream output = File.Create(pathModule))
-							input.CopyTo(output);
-
-					using (Stream openVRArchive = zip.Entries[4].Open())
-						using (FileStream openVRDLL = File.Create(openVRModule))
-							openVRArchive.CopyTo(openVRDLL);
-
-					if (!Directory.Exists(cemuVRDir))
-					{
-						Directory.CreateDirectory(cemuVRDir);
-					}
-					using (Stream superDepthArchive = zip.Entries[5].Open())
-						using (FileStream superDepthFX = File.Create(Path.Combine(targetDir, "cemu-vr", "SuperDepth3D_2.0.6_VR.fx")))
-							superDepthArchive.CopyTo(superDepthFX);
+					using (FileStream output = File.Create(pathModule))
+						input.CopyTo(output);
 				}
+				ZipFile.ExtractToDirectory("")
 			}
 			catch (Exception ex)
 			{

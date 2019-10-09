@@ -1470,9 +1470,7 @@ void reshade::runtime::init_vr_system()
 	if (_is_vr_enabled && s_vr_system_ref_count++ == 0)
 	{
 		vr::EVRInitError e = vr::VRInitError_None;
-
 		vr::IVRSystem* m_pHMD = vr::VR_Init(&e, vr::EVRApplicationType::VRApplication_Scene);
-		vr::TrackedDevicePose_t m_rTrackedDevicePose[vr::k_unMaxTrackedDeviceCount];
 
 		if (e != vr::VRInitError_None || !vr::VRCompositor())
 		{
