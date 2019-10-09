@@ -1,17 +1,32 @@
-ReShade
+CemuVR
 =======
+CemuVR is a fork of ReShade, a generic post-processing injector for games and video software, which aims to add VR rendering to Cemu by modifying and displaying OpenGL pipelines.
 
-This is a generic post-processing injector for games and video software. It exposes an automated way to access both frame color and depth information and a custom shader language called ReShade FX to write effects like ambient occlusion, depth of field, color correction and more which work everywhere.
+*Note: EXPERIMENTAL. Currently only works for win64 platforms*
 
 ## Building
 
 You'll need Visual Studio 2017 or higher to build ReShade and a Python 2.7.9 or later installation (Python 3 is supported as well) for the `gl3w` dependency.
 
-1. Clone this repository including all Git submodules
-2. Open the Visual Studio solution
+1. Clone this repository including all Git submodules (`git clone <repo> --recurse-submodules`)
+2. Open the Visual Studio solution. Do not upgrade if using VS2019.
 3. Select either the "32-bit" or "64-bit" target platform and build the solution (this will build ReShade and all dependencies).
 
 After the first build, a `version.h` file will show up in the [res](/res) directory. Change the `VERSION_FULL` definition inside to something matching the current release version and rebuild so that shaders from the official repository at https://github.com/crosire/reshade-shaders won't cause a version mismatch error during compilation.
+
+In subsequent builds, build in the following order:
+
+1. Release | 32-bit
+2. Release | 64-bit
+3. Release Setup | 64-bit
+
+## Installing
+
+1. Run `CemuVR Setup.exe` from `/bin/AnyCPU/Release`
+2. Extract archive `CemuVR.zip`.
+3. Place `openvr_api.dll` in root Cemu directory, i.e. `/cemu-1.15.15b/`.
+4. Create directory `cemu-vr` in root Cemu directory
+5. Place `SuperDepth3D_2.0.6_VR.fx` into `cemu-vr` directory.
 
 ## Contributing
 
