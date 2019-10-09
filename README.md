@@ -28,6 +28,11 @@ In subsequent builds, build in the following order:
 4. Create directory `cemu-vr` in root Cemu directory
 5. Place `SuperDepth3D_2.0.6_VR.fx` into `cemu-vr` directory.
 
+For best experience, the following graphics packs are needed:
+* FPS++ (set FPS limit to 75)
+* VR Aspect Ratio ([download](https://www.youtube.com/redirect?q=https%3A%2F%2Fcdn.discordapp.com%2Fattachments%2F356187763139280896%2F572156657350606860%2FBreathOfTheWild_VRAspectRatio.zip&redir_token=mxGwKxg0MGcwq9eWXeYw4anFSuZ8MTU3MDY2NzU5NUAxNTcwNTgxMTk1&v=CvrjNLsGQZI&event=video_description))
+* Reshade Compatibility
+
 ## Contributing
 
 Any contributions to the project are welcomed, it's recommended to use GitHub [pull requests](https://help.github.com/articles/using-pull-requests/).
